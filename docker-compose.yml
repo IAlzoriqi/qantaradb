@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  mysql57:
+    image: mysql:5.7
+    container_name: qantaradb_mysql57
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: qantaradb_test_57
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql57_data:/var/lib/mysql
+
+  mysql8:
+    image: mysql:8.0
+    container_name: qantaradb_mysql8
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: qantaradb_test_8
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql8_data:/var/lib/mysql
+
+  mariadb:
+    image: mariadb:10.11
+    container_name: qantaradb_mariadb
+    environment:
+      MYSQL_ROOT_PASSWORD: secret
+      MYSQL_DATABASE: qantaradb_test_maria
+    ports:
+      - "3308:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+
+  postgres:
+    image: postgres:16
+    container_name: qantaradb_postgres
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: qantaradb_test_pg
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  mysql57_data:
+  mysql8_data:
+  mariadb_data:
+  postgres_data:

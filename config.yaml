@@ -1,0 +1,29 @@
+# QantaraDB Migration Configuration Example
+
+# Connection settings
+source_dsn: "root:secret@tcp(127.0.0.1:3307)/foodtech_production?parseTime=true"
+target_dsn: "postgres://postgres:secret@127.0.0.1:5432/qantaradb_test_production?sslmode=disable"
+
+# Table exclusion patterns
+excludes:
+  - "sessions"
+  - "failed_jobs"
+  - "temp_debug_log"
+
+# Type mapper rules & policies
+mapper:
+  tinyint1_as_bool: true
+  datetime_timezone_policy: "utc"       # Options: "utc", "local", "none"
+  geometry_postgis_mode: true          # Use geometry type if PostGIS is active, otherwise maps to bytea
+  enum_as_domain: true                 # Converts mysql enum to text + CHECK (col IN (...))
+  set_as_array: true                   # Map MySQL set types to PostgreSQL text[] arrays
+
+# Streaming, batching & workers layout
+loader:
+  batch_size: 5000                     # Bulk size for COPY insertion (rows per batch)
+  workers: 4                           # Number of parallel worker go-routines for chunk copying
+  state_file_path: "reports/migration_state.json"  # State tracking path for resumable copy sessions
+
+# Reporting targets
+out_report_json: "reports/migration_report.json"
+out_report_md: "reports/migration_report.md"

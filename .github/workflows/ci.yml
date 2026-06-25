@@ -1,0 +1,70 @@
+name: Go CI & Integration Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    name: Build and E2E Tests
+    runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: secret
+          MYSQL_DATABASE: qantaradb_test_8
+        ports:
+          - 3306:3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: secret
+          POSTGRES_DB: qantaradb_test_pg
+        ports:
+          - 5432:5432
+        options: --health-cmd="pg_isready" --health-interval=10s --health-timeout=5s --health-retries=3
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.21'
+        cache: true
+
+    - name: Verify Dependencies
+      run: |
+        cd qantaradb
+        go mod verify
+
+    - name: Go Format Check
+      run: |
+        cd qantaradb
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "The following files are not formatted:"
+          gofmt -s -l .
+          exit 1
+        fi
+
+    - name: Go Vet Lint
+      run: |
+        cd qantaradb
+        go vet ./...
+
+    - name: Run Unit Tests
+      run: |
+        cd qantaradb
+        go test -v -race ./inspector ./mapper ./planner ./ddl ./preflight
+
+    - name: Build CLI Binary
+      run: |
+        cd qantaradb
+        go build -v -o bin/qantaradb cmd/qantaradb/main.go

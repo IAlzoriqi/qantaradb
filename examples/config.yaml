@@ -1,0 +1,51 @@
+# QantaraDB Example Configuration File
+# Copy this file to config.yaml and update with your credentials.
+
+# 1. Connection DSNs
+source_dsn: "root:secret_pass@tcp(127.0.0.1:3306)/foodtech_production"
+target_dsn: "postgres://postgres:secure_pass@127.0.0.1:5432/postgres_target?sslmode=disable"
+
+# 2. Schema Exclusions
+# Tables to exclude from introspection and bulk loading (e.g. transient logs, sessions)
+excludes:
+  - sessions
+  - failed_jobs
+  - password_resets
+  - personal_access_tokens
+  - activity_log
+
+# 3. Type Mapping Customizations
+mapper:
+  # Map tinyint(1) to boolean instead of smallint
+  tinyint1_as_bool: true
+  
+  # Timezone handling for datetime columns. Options: "utc", "local", "none"
+  datetime_timezone_policy: "utc"
+  
+  # If true, map MySQL POINT/GEOMETRY classes to PostGIS geometry. If false, fallback to binary bytea.
+  geometry_postgis_mode: true
+  
+  # Compile ENUM column definitions to native PostgreSQL ENUM/DOMAIN types instead of TEXT CHECK constraints
+  enum_as_domain: true
+
+# 4. Copy Performance Tuning & State Checkpoints
+loader:
+  # Number of rows per bulk copy transaction block
+  batch_size: 5000
+  
+  # Number of parallel workers/channels streaming rows
+  workers_count: 4
+  
+  # Path to persist incremental chunk checkpoint progress (for seamless resuming on drops)
+  state_file_path: "reports/migration_state.json"
+
+# 5. Output Reports Configuration
+# Filepath to save detailed run analytics JSON
+out_report_json: "reports/migration_report.json"
+
+# Filepath to compile markdown executive parities summary
+out_report_md: "reports/migration_report.md"
+
+# 6. Safety Flags
+# Set to true to allow DROP TABLE operations on target databases that don't match test/dev naming prefixes
+allow_destructive_production_operations: false
