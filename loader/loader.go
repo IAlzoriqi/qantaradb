@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
@@ -38,11 +37,12 @@ type JobState struct {
 }
 
 type Loader struct {
-	mysqlDB  *sql.DB
-	pgxPool  *pgxpool.Pool
-	config   Config
-	state    *JobState
-	stateMux sync.Mutex
+	mysqlDB           *sql.DB
+	pgxPool           *pgxpool.Pool
+	config            Config
+	state             *JobState
+	stateMux          sync.Mutex
+	sanitizedRecorder *SanitizedRecorder
 }
 
 func NewLoader(mysqlDSN, pgDSN string, config Config) (*Loader, error) {
@@ -71,6 +71,7 @@ func NewLoader(mysqlDSN, pgDSN string, config Config) (*Loader, error) {
 		state: &JobState{
 			Progresses: make(map[string]*TableProgress),
 		},
+		sanitizedRecorder: NewSanitizedRecorder(),
 	}
 
 	_ = loader.loadState()
@@ -97,6 +98,10 @@ func (l *Loader) MySQLDB() *sql.DB {
 
 func (l *Loader) PostgresPool() *pgxpool.Pool {
 	return l.pgxPool
+}
+
+func (l *Loader) SanitizedRowsReport() SanitizedRowsReport {
+	return l.sanitizedRecorder.Report()
 }
 
 func (l *Loader) saveState() error {
@@ -252,6 +257,7 @@ func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol stri
 		}
 
 		var chunkRows [][]interface{}
+		pkIndex := columnIndex(columns, pkCol)
 		for rows.Next() {
 			err = rows.Scan(scanArgs...)
 			if err != nil {
@@ -264,9 +270,9 @@ func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol stri
 				if val != nil {
 					// Extract bytes or string correctly depending on types if necessary
 					if b, ok := val.([]byte); ok {
-						rowVals[i] = sanitizePostgresText(string(b))
+						rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], primaryKeyValue(values, pkIndex), string(b), "mysql_bytes")
 					} else if s, ok := val.(string); ok {
-						rowVals[i] = sanitizePostgresText(s)
+						rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], primaryKeyValue(values, pkIndex), s, "mysql_string")
 					} else {
 						rowVals[i] = val
 					}
@@ -364,9 +370,9 @@ func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns
 		for i, val := range values {
 			if val != nil {
 				if b, ok := val.([]byte); ok {
-					rowVals[i] = sanitizePostgresText(string(b))
+					rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], "no_primary_key", string(b), "mysql_bytes")
 				} else if s, ok := val.(string); ok {
-					rowVals[i] = sanitizePostgresText(s)
+					rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], "no_primary_key", s, "mysql_string")
 				} else {
 					rowVals[i] = val
 				}
@@ -419,6 +425,29 @@ func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns
 	return nil
 }
 
-func sanitizePostgresText(value string) string {
-	return strings.ReplaceAll(strings.ToValidUTF8(value, ""), "\x00", "")
+func (l *Loader) sanitizeValueForCopy(tableName, columnName, primaryKey, value, originalKind string) string {
+	sanitized, reasons := SanitizePostgresTextForReport(value)
+	for _, reason := range reasons {
+		l.sanitizedRecorder.Record(tableName, columnName, primaryKey, reason, originalKind, "postgres_text", LimitedSample(value))
+	}
+	return sanitized
+}
+
+func columnIndex(columns []string, needle string) int {
+	for i, column := range columns {
+		if column == needle {
+			return i
+		}
+	}
+	return -1
+}
+
+func primaryKeyValue(values []interface{}, pkIndex int) string {
+	if pkIndex < 0 || pkIndex >= len(values) || values[pkIndex] == nil {
+		return "unknown"
+	}
+	if b, ok := values[pkIndex].([]byte); ok {
+		return string(b)
+	}
+	return fmt.Sprintf("%v", values[pkIndex])
 }

@@ -257,6 +257,16 @@ func runMigrate() {
 		}
 	}
 
+	sanitizedReport := loaderInstance.SanitizedRowsReport()
+	if err := loader.WriteSanitizedRowsReports(
+		sanitizedReport,
+		"storage/reports/qantaradb_sanitized_rows_report.json",
+		"storage/reports/qantaradb_sanitized_rows_report.md",
+	); err != nil {
+		fmt.Printf("Failed to write sanitized rows report: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Apply Indexes and FK constraints DDL
 	fmt.Println("Migration streaming complete! Applying indexes and foreign keys constraints...")
 	for _, tableName := range plan.TableOrder {
@@ -275,6 +285,23 @@ func runMigrate() {
 			}
 		}
 	}
+
+	tables, pkMap := validationTargets(plan)
+	sequenceReport := validator.ResetAndValidateSequences(ctx, loaderInstance.PostgresPool(), tables, pkMap)
+	if err := validator.WriteSequenceResetReports(
+		sequenceReport,
+		"storage/reports/qantaradb_sequence_reset_report.json",
+		"storage/reports/qantaradb_sequence_reset_report.md",
+	); err != nil {
+		fmt.Printf("Failed to write sequence reset report: %v\n", err)
+		os.Exit(1)
+	}
+	if sequenceReport.Status == "reset_failed" {
+		fmt.Println("VALIDATION_FAILED")
+		fmt.Println("Sequence reset failed; staging readiness is blocked.")
+		os.Exit(1)
+	}
+
 	if err := writeMigrationPreviewReports(reportPrefix, schema, plan, ddlRes, false, "executed_local_only"); err != nil {
 		fmt.Printf("Failed to write migration report: %v\n", err)
 		os.Exit(1)
@@ -322,18 +349,28 @@ func runValidate() {
 	}
 	defer loaderInstance.Close()
 
-	tables := make([]string, 0, len(plan.Tables))
-	pkMap := make(map[string]string)
-	for _, table := range plan.Tables {
-		tables = append(tables, table.TargetName)
-		if table.PrimaryKeyColumn != "" {
-			pkMap[table.TargetName] = table.PrimaryKeyColumn
-		}
-	}
+	tables, pkMap := validationTargets(plan)
 
 	validationReport, err := validator.Validate(loaderInstance.MySQLDB(), loaderInstance.PostgresPool(), tables, pkMap)
 	if err != nil {
 		fmt.Printf("Validation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := validator.WriteSequenceResetReports(
+		validationReport.SequenceValidation,
+		"storage/reports/qantaradb_sequence_reset_report.json",
+		"storage/reports/qantaradb_sequence_reset_report.md",
+	); err != nil {
+		fmt.Printf("Failed to write sequence reset report: %v\n", err)
+		os.Exit(1)
+	}
+	if err := loader.WriteSanitizedRowsReports(
+		loaderInstance.SanitizedRowsReport(),
+		"storage/reports/qantaradb_sanitized_rows_report.json",
+		"storage/reports/qantaradb_sanitized_rows_report.md",
+	); err != nil {
+		fmt.Printf("Failed to write sanitized rows report: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -344,12 +381,38 @@ func runValidate() {
 		os.Exit(1)
 	}
 
-	md := fmt.Sprintf("# QantaraDB Validation Report\n\nstatus: completed\n\ntotal_tables: %d\n\npassed_tables: %d\n\nforeign_keys_passed: %t\n", validationReport.TotalTables, validationReport.PassedTables, validationReport.FKIntegrityPassed)
+	md := fmt.Sprintf(`# QantaraDB Validation Report
+
+status:
+%s
+
+staging_readiness:
+%s
+
+total_tables:
+%d
+
+passed_tables:
+%d
+
+foreign_keys_passed:
+%t
+
+sequence_reset:
+%s
+
+blocked_reasons:
+%s
+`, validationReport.Status, validationReport.StagingReadiness.Status, validationReport.TotalTables, validationReport.PassedTables, validationReport.FKIntegrityPassed, validationReport.SequenceValidation.Status, strings.Join(validationReport.StagingReadiness.Reasons, "; "))
 	if err := writeFile(*out, []byte(md)); err != nil {
 		fmt.Printf("Failed to write validation markdown: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("Validation markdown report exported to: %s\n", *out)
+	fmt.Println(validationReport.Status)
+	if validationReport.Status == "VALIDATION_FAILED" {
+		os.Exit(1)
+	}
 }
 
 func runResume() {
@@ -565,6 +628,18 @@ func containsAny(value string, needles []string) bool {
 		}
 	}
 	return false
+}
+
+func validationTargets(plan *planner.MigrationPlan) ([]string, map[string]string) {
+	tables := make([]string, 0, len(plan.Tables))
+	pkMap := make(map[string]string)
+	for _, table := range plan.Tables {
+		tables = append(tables, table.TargetName)
+		if table.PrimaryKeyColumn != "" {
+			pkMap[table.TargetName] = table.PrimaryKeyColumn
+		}
+	}
+	return tables, pkMap
 }
 
 func writeMigrationPreviewReports(prefix string, schema *inspector.SchemaInfo, plan *planner.MigrationPlan, ddlRes *ddl.DDLResult, dryRun bool, status string) error {
