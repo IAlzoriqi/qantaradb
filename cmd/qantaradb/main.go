@@ -245,9 +245,13 @@ func runMigrate() {
 		}
 
 		fmt.Printf("Streaming table: %s\n", tableName)
-		cols := []string{}
+		cols := []loader.ColumnPlan{}
 		for _, col := range tPlan.Columns {
-			cols = append(cols, col.SourceName)
+			cols = append(cols, loader.ColumnPlan{
+				SourceName: col.SourceName,
+				TargetName: col.TargetName,
+				TargetType: col.TargetType,
+			})
 		}
 
 		err = loaderInstance.StreamTable(ctx, tableName, tPlan.PrimaryKeyColumn, cols)
