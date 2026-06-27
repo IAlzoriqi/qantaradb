@@ -72,15 +72,20 @@ qantaradb plan --inspect /tmp/inspect.json --out /tmp/plan.json
 ---
 
 ### 4. `migrate`
-Performs the migration. This creates schemas, indices, and uses high-speed parallel workers to bulk copy rows.
+Performs the migration. It is safe by default: without `--execute`, it writes
+dry-run reports only and does not write to PostgreSQL.
 
 **Flags:**
 * `--config` (string, optional, default: `config.yaml`): Path to the YAML configuration file.
+* `--dry-run` (boolean, default: true): Preview schema and copy plan only.
+* `--execute` (boolean): Required for real local copy.
+* `--local-only` (boolean): Required with `--execute`; source and target must be localhost/127.0.0.1 and target database must include `local`, `test`, or `qantara`.
 * `--force-destructive-production-drop` (boolean, optional): Override and bypass drop protection when migrating to a production database that does not have `test` or `dev` in its DSN name.
 
 **Example:**
 ```bash
-qantaradb migrate --config config.yaml --force-destructive-production-drop
+qantaradb migrate --config config.yaml --dry-run
+qantaradb migrate --config config.yaml --execute --local-only
 ```
 
 ---

@@ -2,16 +2,17 @@ package planner
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/OWNER/qantaradb/inspector"
 	"github.com/OWNER/qantaradb/mapper"
 )
 
 type MigrationPlan struct {
-	SourceDatabase string            `json:"source_database"`
-	Tables         []TablePlan       `json:"tables"`
-	TableOrder     []string          `json:"table_order"` // Topologically sorted
-	Config         mapper.Config     `json:"config"`
+	SourceDatabase string        `json:"source_database"`
+	Tables         []TablePlan   `json:"tables"`
+	TableOrder     []string      `json:"table_order"` // Topologically sorted
+	Config         mapper.Config `json:"config"`
 }
 
 type TablePlan struct {
@@ -24,12 +25,12 @@ type TablePlan struct {
 }
 
 type ColumnPlan struct {
-	SourceName   string   `json:"source_name"`
-	TargetName   string   `json:"target_name"`
-	SourceType   string   `json:"source_type"`
-	TargetType   string   `json:"target_type"`
-	IsNullable   bool     `json:"is_nullable"`
-	Constraints  []string `json:"constraints"`
+	SourceName  string   `json:"source_name"`
+	TargetName  string   `json:"target_name"`
+	SourceType  string   `json:"source_type"`
+	TargetType  string   `json:"target_type"`
+	IsNullable  bool     `json:"is_nullable"`
+	Constraints []string `json:"constraints"`
 }
 
 func CreatePlan(schema *inspector.SchemaInfo, mConfig mapper.Config, excludes []string) (*MigrationPlan, error) {

@@ -25,27 +25,25 @@ func MapType(col inspector.Column, config Config) (string, []string, error) {
 	dataType := strings.ToLower(col.DataType)
 	columnType := strings.ToLower(col.ColumnType)
 
-	var constraints []string
-
 	switch dataType {
 	case "tinyint":
 		if config.Tinyint1AsBool && (strings.Contains(columnType, "(1)") || col.ColumnType == "tinyint(1)") {
 			return "boolean", nil, nil
 		}
 		if col.IsUnsigned {
-			return "smallint", []string{fmt.Sprintf("CHECK (%s >= 0)", col.Name)}, nil
+			return "smallint", []string{fmt.Sprintf("CHECK (%s >= 0)", quoteIdent(col.Name))}, nil
 		}
 		return "smallint", nil, nil
 
 	case "smallint", "mediumint":
 		if col.IsUnsigned {
-			return "integer", []string{fmt.Sprintf("CHECK (%s >= 0)", col.Name)}, nil
+			return "integer", []string{fmt.Sprintf("CHECK (%s >= 0)", quoteIdent(col.Name))}, nil
 		}
 		return "smallint", nil, nil
 
 	case "int", "integer":
 		if col.IsUnsigned {
-			return "bigint", []string{fmt.Sprintf("CHECK (%s >= 0)", col.Name)}, nil
+			return "bigint", []string{fmt.Sprintf("CHECK (%s >= 0)", quoteIdent(col.Name))}, nil
 		}
 		return "integer", nil, nil
 
@@ -53,7 +51,7 @@ func MapType(col inspector.Column, config Config) (string, []string, error) {
 		if col.IsUnsigned {
 			// PostgreSQL signed bigint can't hold unsigned bigint max (18446744073709551615)
 			// Map to numeric(20,0) to hold all values precisely
-			return "numeric(20,0)", []string{fmt.Sprintf("CHECK (%s >= 0)", col.Name)}, nil
+			return "numeric(20,0)", []string{fmt.Sprintf("CHECK (%s >= 0)", quoteIdent(col.Name))}, nil
 		}
 		return "bigint", nil, nil
 
@@ -112,7 +110,7 @@ func MapType(col inspector.Column, config Config) (string, []string, error) {
 		return "time without time zone", nil, nil
 
 	case "year":
-		return "smallint", []string{fmt.Sprintf("CHECK (%s >= 1901 AND %s <= 2155)", col.Name, col.Name)}, nil
+		return "smallint", []string{fmt.Sprintf("CHECK (%s >= 1901 AND %s <= 2155)", quoteIdent(col.Name), quoteIdent(col.Name))}, nil
 
 	case "geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon", "geometrycollection":
 		if config.GeometryPostGISMode {
@@ -130,11 +128,10 @@ func MapType(col inspector.Column, config Config) (string, []string, error) {
 				values := matches[1]
 				if config.EnumAsDomain {
 					// User may create custom enum type; but inline text CHECK constraint is highly robust and requires no schema DDL setup
-					constraint := fmt.Sprintf("CHECK (%s IN (%s))", col.Name, values)
+					constraint := fmt.Sprintf("CHECK (%s IN (%s))", quoteIdent(col.Name), values)
 					return "text", []string{constraint}, nil
 				}
-				constraint := fmt.Sprintf("CHECK (%s IN (%s))", col.Name, values)
-				return "text", []string{constraint}, nil
+				return "text", nil, nil
 			}
 		}
 
@@ -148,4 +145,8 @@ func MapType(col inspector.Column, config Config) (string, []string, error) {
 
 		return "text", nil, nil
 	}
+}
+
+func quoteIdent(identifier string) string {
+	return `"` + strings.ReplaceAll(identifier, `"`, `""`) + `"`
 }

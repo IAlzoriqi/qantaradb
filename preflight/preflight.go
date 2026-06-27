@@ -25,25 +25,25 @@ type PreflightReport struct {
 }
 
 var postgresReservedWords = map[string]bool{
-	"user":     true,
-	"group":    true,
-	"order":    true,
-	"limit":    true,
-	"offset":   true,
-	"select":   true,
-	"table":    true,
-	"column":   true,
-	"primary":  true,
-	"foreign":  true,
-	"key":      true,
-	"check":    true,
-	"index":    true,
-	"create":   true,
-	"where":    true,
-	"join":     true,
-	"having":   true,
-	"union":    true,
-	"cast":     true,
+	"user":    true,
+	"group":   true,
+	"order":   true,
+	"limit":   true,
+	"offset":  true,
+	"select":  true,
+	"table":   true,
+	"column":  true,
+	"primary": true,
+	"foreign": true,
+	"key":     true,
+	"check":   true,
+	"index":   true,
+	"create":  true,
+	"where":   true,
+	"join":    true,
+	"having":  true,
+	"union":   true,
+	"cast":    true,
 }
 
 func RunPreflight(schema *inspector.SchemaInfo) (*PreflightReport, error) {
@@ -170,7 +170,7 @@ The preflight engine scanned the MySQL/MariaDB schema to flag architectural and 
 		rep.TotalRisks,
 		rep.HighRisksCount,
 		rep.HighRisksCount,
-		rep.TotalRisks - rep.HighRisksCount, // simple count representation
+		rep.TotalRisks-rep.HighRisksCount, // simple count representation
 		0,
 	)
 
@@ -185,7 +185,7 @@ The preflight engine scanned the MySQL/MariaDB schema to flag architectural and 
 				severityEmoji = "🟡"
 			}
 
-			md += fmt.Sprintf("### %d. [%s] %s (%s.%s)\n\n", i+1, r.RiskLevel, r.Category, r.TableName, r.ColumnName)
+			md += fmt.Sprintf("### %d. %s [%s] %s (%s.%s)\n\n", i+1, severityEmoji, r.RiskLevel, r.Category, r.TableName, r.ColumnName)
 			md += fmt.Sprintf("**Description:** %s\n\n", r.Description)
 			md += fmt.Sprintf("**Remedy:** %s\n\n", r.Remedy)
 			md += "---\n\n"

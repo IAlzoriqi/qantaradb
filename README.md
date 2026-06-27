@@ -79,7 +79,8 @@ Generate a customizable type mapping and order list:
 Use a YAML configuration file to run the schema mapping, streaming copying, and sequence synchronization:
 
 ```bash
-./bin/qantaradb migrate --config config.yaml
+./bin/qantaradb migrate --config config.yaml --dry-run
+./bin/qantaradb migrate --config config.yaml --execute --local-only
 ```
 
 ### 5. Validate Integrity
@@ -108,7 +109,7 @@ Check row counts and key drift, reset sequences, and generate markdown auditing 
 ## Safety Guidelines & Policy
 
 1. **Read-Only Source**: The library opens connections with read-only operations for the source database. It will NEVER execute writes or alter tables on your source MySQL database.
-2. **Target Drop Protection**: Drop target tables only if target database name prefix matches `qantaradb_test_*` AND the `--allow-drop-target` flag is explicitly passed to prevent accidental loss of production postgres instances.
+2. **Target Write Protection**: `migrate` is dry-run by default. Real copy requires `--execute --local-only`, a local source/target host, and a target database name containing `local`, `test`, or `qantara`.
 3. **No Hardcoded Credentials**: DSNs and secrets should be provided via OS environment variables or passed securely. Never commit files containing database credentials.
 
 ---
