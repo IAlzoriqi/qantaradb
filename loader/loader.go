@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +36,12 @@ type JobState struct {
 	SourceDatabase string                    `json:"source_database"`
 	StartTime      time.Time                 `json:"start_time"`
 	Progresses     map[string]*TableProgress `json:"progress_map"`
+}
+
+type ColumnPlan struct {
+	SourceName string
+	TargetName string
+	TargetType string
 }
 
 type Loader struct {
@@ -142,7 +150,7 @@ func (l *Loader) loadState() error {
 	return nil
 }
 
-func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, columns []string) error {
+func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, columns []ColumnPlan) error {
 	l.stateMux.Lock()
 	prog, exists := l.state.Progresses[tableName]
 	if !exists {
@@ -198,7 +206,7 @@ func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, colum
 	return nil
 }
 
-func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol string, columns []string, prog *TableProgress, start time.Time) error {
+func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol string, columns []ColumnPlan, prog *TableProgress, start time.Time) error {
 	var minVal, maxVal int64
 	err := l.mysqlDB.QueryRow(fmt.Sprintf("SELECT COALESCE(MIN(`%s`), 0), COALESCE(MAX(`%s`), 0) FROM `%s`", pkCol, pkCol, tableName)).Scan(&minVal, &maxVal)
 	if err != nil {
@@ -222,12 +230,12 @@ func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol stri
 		if i > 0 {
 			colNames += ", "
 		}
-		colNames += fmt.Sprintf("`%s`", col)
+		colNames += fmt.Sprintf("`%s`", col.SourceName)
 	}
 
 	pgCols := make([]string, len(columns))
 	for i, col := range columns {
-		pgCols[i] = col
+		pgCols[i] = col.TargetName
 	}
 
 	batchSize := int64(l.config.BatchSize)
@@ -267,18 +275,7 @@ func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol stri
 
 			rowVals := make([]interface{}, len(columns))
 			for i, val := range values {
-				if val != nil {
-					// Extract bytes or string correctly depending on types if necessary
-					if b, ok := val.([]byte); ok {
-						rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], primaryKeyValue(values, pkIndex), string(b), "mysql_bytes")
-					} else if s, ok := val.(string); ok {
-						rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], primaryKeyValue(values, pkIndex), s, "mysql_string")
-					} else {
-						rowVals[i] = val
-					}
-				} else {
-					rowVals[i] = nil
-				}
+				rowVals[i] = l.normalizeValueForCopy(tableName, columns[i], primaryKeyValue(values, pkIndex), val)
 			}
 			chunkRows = append(chunkRows, rowVals)
 		}
@@ -318,18 +315,18 @@ func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol stri
 	return nil
 }
 
-func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns []string, prog *TableProgress, start time.Time) error {
+func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns []ColumnPlan, prog *TableProgress, start time.Time) error {
 	colNames := ""
 	for i, col := range columns {
 		if i > 0 {
 			colNames += ", "
 		}
-		colNames += fmt.Sprintf("`%s`", col)
+		colNames += fmt.Sprintf("`%s`", col.SourceName)
 	}
 
 	pgCols := make([]string, len(columns))
 	for i, col := range columns {
-		pgCols[i] = col
+		pgCols[i] = col.TargetName
 	}
 
 	// For standard queries, scan streaming in batches
@@ -368,17 +365,7 @@ func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns
 
 		rowVals := make([]interface{}, len(columns))
 		for i, val := range values {
-			if val != nil {
-				if b, ok := val.([]byte); ok {
-					rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], "no_primary_key", string(b), "mysql_bytes")
-				} else if s, ok := val.(string); ok {
-					rowVals[i] = l.sanitizeValueForCopy(tableName, columns[i], "no_primary_key", s, "mysql_string")
-				} else {
-					rowVals[i] = val
-				}
-			} else {
-				rowVals[i] = nil
-			}
+			rowVals[i] = l.normalizeValueForCopy(tableName, columns[i], "no_primary_key", val)
 		}
 		batch = append(batch, rowVals)
 
@@ -433,9 +420,81 @@ func (l *Loader) sanitizeValueForCopy(tableName, columnName, primaryKey, value, 
 	return sanitized
 }
 
-func columnIndex(columns []string, needle string) int {
+func (l *Loader) normalizeValueForCopy(tableName string, column ColumnPlan, primaryKey string, value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+
+	if isPostgresBooleanType(column.TargetType) {
+		if normalized, ok := normalizeBoolForCopy(value); ok {
+			return normalized
+		}
+	}
+
+	if b, ok := value.([]byte); ok {
+		sanitized := l.sanitizeValueForCopy(tableName, column.TargetName, primaryKey, string(b), "mysql_bytes")
+		return sanitized
+	}
+	if s, ok := value.(string); ok {
+		return l.sanitizeValueForCopy(tableName, column.TargetName, primaryKey, s, "mysql_string")
+	}
+
+	return value
+}
+
+func isPostgresBooleanType(targetType string) bool {
+	return strings.EqualFold(strings.TrimSpace(targetType), "boolean")
+}
+
+func normalizeBoolForCopy(value interface{}) (bool, bool) {
+	switch v := value.(type) {
+	case bool:
+		return v, true
+	case int64:
+		return v != 0, true
+	case int:
+		return v != 0, true
+	case int32:
+		return v != 0, true
+	case int16:
+		return v != 0, true
+	case int8:
+		return v != 0, true
+	case uint64:
+		return v != 0, true
+	case uint:
+		return v != 0, true
+	case uint32:
+		return v != 0, true
+	case uint16:
+		return v != 0, true
+	case uint8:
+		return v != 0, true
+	case []byte:
+		return parseBoolLiteralForCopy(string(v))
+	case string:
+		return parseBoolLiteralForCopy(v)
+	}
+	return false, false
+}
+
+func parseBoolLiteralForCopy(value string) (bool, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "1", "t", "true", "y", "yes", "on":
+		return true, true
+	case "0", "f", "false", "n", "no", "off":
+		return false, true
+	}
+	if parsed, err := strconv.ParseInt(normalized, 10, 64); err == nil {
+		return parsed != 0, true
+	}
+	return false, false
+}
+
+func columnIndex(columns []ColumnPlan, needle string) int {
 	for i, column := range columns {
-		if column == needle {
+		if column.SourceName == needle {
 			return i
 		}
 	}
