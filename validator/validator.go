@@ -12,13 +12,13 @@ import (
 )
 
 type ValidationReport struct {
-	TotalTables       int                 `json:"total_tables"`
-	PassedTables      int                 `json:"passed_tables"`
-	TablesValidation  []TableValidation   `json:"tables_validation"`
-	FKIntegrityPassed bool                `json:"fk_integrity_passed"`
-	FKViolations      []FKViolation       `json:"fk_violations"`
-	TypeMappings      []TypeMapItem       `json:"type_mappings"`
-	ArabicEmojiAudit  ArabicEmojiReport   `json:"arabic_emoji_audit"`
+	TotalTables       int               `json:"total_tables"`
+	PassedTables      int               `json:"passed_tables"`
+	TablesValidation  []TableValidation `json:"tables_validation"`
+	FKIntegrityPassed bool              `json:"fk_integrity_passed"`
+	FKViolations      []FKViolation     `json:"fk_violations"`
+	TypeMappings      []TypeMapItem     `json:"type_mappings"`
+	ArabicEmojiAudit  ArabicEmojiReport `json:"arabic_emoji_audit"`
 }
 
 type TableValidation struct {
@@ -39,28 +39,28 @@ type TableValidation struct {
 }
 
 type FKViolation struct {
-	ConstraintName  string `json:"constraint_name"`
-	ChildTable      string `json:"child_table"`
-	ChildColumn     string `json:"child_column"`
-	ParentTable     string `json:"parent_table"`
-	ParentColumn    string `json:"parent_column"`
-	ViolationCount  int64  `json:"violation_count"`
+	ConstraintName string `json:"constraint_name"`
+	ChildTable     string `json:"child_table"`
+	ChildColumn    string `json:"child_column"`
+	ParentTable    string `json:"parent_table"`
+	ParentColumn   string `json:"parent_column"`
+	ViolationCount int64  `json:"violation_count"`
 }
 
 type TypeMapItem struct {
-	TableName      string `json:"table_name"`
-	ColumnName     string `json:"column_name"`
-	SourceType     string `json:"source_type"`
-	TargetType     string `json:"target_type"`
-	Constraints    string `json:"constraints"`
+	TableName   string `json:"table_name"`
+	ColumnName  string `json:"column_name"`
+	SourceType  string `json:"source_type"`
+	TargetType  string `json:"target_type"`
+	Constraints string `json:"constraints"`
 }
 
 type ArabicEmojiReport struct {
-	ArabicTextMatch  bool   `json:"arabic_text_match"`
-	EmojiMatch       bool   `json:"emoji_match"`
-	SourceCharset    string `json:"source_charset"`
-	TargetEncoding   string `json:"target_encoding"`
-	Details          string `json:"details"`
+	ArabicTextMatch bool   `json:"arabic_text_match"`
+	EmojiMatch      bool   `json:"emoji_match"`
+	SourceCharset   string `json:"source_charset"`
+	TargetEncoding  string `json:"target_encoding"`
+	Details         string `json:"details"`
 }
 
 func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map[string]string) (*ValidationReport, error) {
@@ -93,7 +93,7 @@ func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map
 	report.ArabicEmojiAudit.TargetEncoding = pgEncoding
 
 	// Check if source or target doesn't support utf8/utf8mb4
-	if !strings.Contains(strings.ToLower(report.ArabicEmojiAudit.SourceCharset), "utf8") && 
+	if !strings.Contains(strings.ToLower(report.ArabicEmojiAudit.SourceCharset), "utf8") &&
 		!strings.Contains(strings.ToLower(report.ArabicEmojiAudit.SourceCharset), "utf8mb4") {
 		report.ArabicEmojiAudit.Details = "Warning: Source character set is not UTF-8/utf8mb4, Arabic and Emojis might suffer transcoding losses!"
 	}
@@ -208,9 +208,9 @@ func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map
 					SELECT COUNT(*) 
 					FROM "%s" c 
 					LEFT JOIN "%s" p ON c."%s" = p."%s" 
-					WHERE c."%s" IS NOT NULL AND p."%s" IS NULL`, 
+					WHERE c."%s" IS NOT NULL AND p."%s" IS NULL`,
 					violation.ChildTable, violation.ParentTable, violation.ChildColumn, violation.ParentColumn, violation.ChildColumn, violation.ParentColumn)
-				
+
 				var vCount int64
 				err = pgxPool.QueryRow(ctx, checkQuery).Scan(&vCount)
 				if err == nil && vCount > 0 {
@@ -316,7 +316,6 @@ func calculateSampleChecksum(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxp
 	}
 	defer tgtRows.Close()
 
-	tgtFields := tgtRows.FieldDescriptions()
 	var tgtConcat []string
 	for tgtRows.Next() {
 		tgtValues, err := tgtRows.Values()
@@ -356,7 +355,7 @@ func auditTypeMappings(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxpool.Po
 		SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE
 		FROM information_schema.columns 
 		WHERE table_schema = DATABASE() AND table_name = ?`
-	
+
 	mysqlRows, err := mysqlDB.Query(mysqlQuery, table)
 	if err != nil {
 		return nil, err
@@ -384,7 +383,7 @@ func auditTypeMappings(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxpool.Po
 			SELECT data_type, is_nullable 
 			FROM information_schema.columns 
 			WHERE table_name = $1 AND column_name = $2`
-		
+
 		err = pgxPool.QueryRow(ctx, pgQuery, table, mCol.Name).Scan(&pgDataType, &isNullable)
 		if err != nil {
 			pgDataType = "not_found"

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,14 +21,14 @@ type Config struct {
 }
 
 type TableProgress struct {
-	TableName     string    `json:"table_name"`
-	TotalRows     int64     `json:"total_rows"`
-	CompletedRows int64     `json:"completed_rows"`
-	Status        string    `json:"status"` // "pending", "running", "completed", "failed"
+	TableName     string      `json:"table_name"`
+	TotalRows     int64       `json:"total_rows"`
+	CompletedRows int64       `json:"completed_rows"`
+	Status        string      `json:"status"` // "pending", "running", "completed", "failed"
 	LastPKValue   interface{} `json:"last_pk_value"`
-	ElapsedSec    float64   `json:"elapsed_sec"`
-	RowsPerSec    float64   `json:"rows_per_sec"`
-	ETASeconds    float64   `json:"eta_seconds"`
+	ElapsedSec    float64     `json:"elapsed_sec"`
+	RowsPerSec    float64     `json:"rows_per_sec"`
+	ETASeconds    float64     `json:"eta_seconds"`
 }
 
 type JobState struct {
@@ -83,6 +84,19 @@ func (l *Loader) Close() {
 	if l.pgxPool != nil {
 		l.pgxPool.Close()
 	}
+}
+
+func (l *Loader) ExecPostgres(ctx context.Context, statement string) error {
+	_, err := l.pgxPool.Exec(ctx, statement)
+	return err
+}
+
+func (l *Loader) MySQLDB() *sql.DB {
+	return l.mysqlDB
+}
+
+func (l *Loader) PostgresPool() *pgxpool.Pool {
+	return l.pgxPool
 }
 
 func (l *Loader) saveState() error {
@@ -250,7 +264,9 @@ func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol stri
 				if val != nil {
 					// Extract bytes or string correctly depending on types if necessary
 					if b, ok := val.([]byte); ok {
-						rowVals[i] = string(b)
+						rowVals[i] = sanitizePostgresText(string(b))
+					} else if s, ok := val.(string); ok {
+						rowVals[i] = sanitizePostgresText(s)
 					} else {
 						rowVals[i] = val
 					}
@@ -348,7 +364,9 @@ func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns
 		for i, val := range values {
 			if val != nil {
 				if b, ok := val.([]byte); ok {
-					rowVals[i] = string(b)
+					rowVals[i] = sanitizePostgresText(string(b))
+				} else if s, ok := val.(string); ok {
+					rowVals[i] = sanitizePostgresText(s)
 				} else {
 					rowVals[i] = val
 				}
@@ -399,4 +417,8 @@ func (l *Loader) streamWithCursor(ctx context.Context, tableName string, columns
 	}
 
 	return nil
+}
+
+func sanitizePostgresText(value string) string {
+	return strings.ReplaceAll(strings.ToValidUTF8(value, ""), "\x00", "")
 }

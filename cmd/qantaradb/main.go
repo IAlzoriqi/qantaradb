@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/OWNER/qantaradb/ddl"
@@ -20,14 +23,14 @@ import (
 )
 
 type ConfigFile struct {
-	SourceDSN   string        `yaml:"source_dsn"`
-	TargetDSN   string        `yaml:"target_dsn"`
-	Excludes    []string      `yaml:"excludes"`
-	Mapper      mapper.Config `yaml:"mapper"`
-	Loader      loader.Config `yaml:"loader"`
-	OutReportJSON string      `yaml:"out_report_json"`
-	OutReportMD   string      `yaml:"out_report_md"`
-	AllowDestructiveProductionOperations bool `yaml:"allow_destructive_production_operations"`
+	SourceDSN                            string        `yaml:"source_dsn"`
+	TargetDSN                            string        `yaml:"target_dsn"`
+	Excludes                             []string      `yaml:"excludes"`
+	Mapper                               mapper.Config `yaml:"mapper"`
+	Loader                               loader.Config `yaml:"loader"`
+	OutReportJSON                        string        `yaml:"out_report_json"`
+	OutReportMD                          string        `yaml:"out_report_md"`
+	AllowDestructiveProductionOperations bool          `yaml:"allow_destructive_production_operations"`
 }
 
 func main() {
@@ -71,8 +74,8 @@ Usage:
 Commands:
   inspect              Inspect MySQL/MariaDB database schema and produce a JSON report.
   plan                 Generate a customized migration plan (topological table order & type maps).
-  migrate              Execute schema creation and streaming chunk data copy.
-  validate             Validate migrated data counts, checksums, and FK constraints.
+	  migrate              Dry-run by default; execute schema creation and streaming copy only with --execute --local-only.
+	  validate             Validate migrated data counts, checksums, and FK constraints.
   resume               Resume a previously failed or paused migration.
   report               Generate detailed visual markdown/JSON reports of migration results.
   foodtech-preflight   Check Laravel & MySQL-specific compatibility risks for FoodTech schemas.
@@ -84,7 +87,8 @@ func runInspect() {
 	cmd := flag.NewFlagSet("inspect", flag.ExitOnError)
 	mysqlDSN := cmd.String("mysql", "", "MySQL connection string (DSN)")
 	out := cmd.String("out", "reports/inspect.json", "Output file path for inspection JSON")
-	
+	_ = cmd.Bool("dry-run", true, "Accepted for command consistency; inspect is read-only")
+
 	_ = cmd.Parse(os.Args[2:])
 
 	if *mysqlDSN == "" {
@@ -110,7 +114,7 @@ func runPlan() {
 	cmd := flag.NewFlagSet("plan", flag.ExitOnError)
 	inspectFile := cmd.String("inspect", "reports/inspect.json", "Path to inspection JSON report")
 	out := cmd.String("out", "reports/plan.json", "Output file path for migration plan JSON")
-	
+
 	_ = cmd.Parse(os.Args[2:])
 
 	data, err := os.ReadFile(*inspectFile)
@@ -143,14 +147,29 @@ func runPlan() {
 func runMigrate() {
 	cmd := flag.NewFlagSet("migrate", flag.ExitOnError)
 	configPath := cmd.String("config", "config.yaml", "Path to YAML configuration file")
+	dryRun := cmd.Bool("dry-run", true, "Preview schema and plan only; this is the default")
+	execute := cmd.Bool("execute", false, "Execute local migration after safety gates pass")
+	localOnly := cmd.Bool("local-only", false, "Required for execution; source and target must be local")
 	forceDrop := cmd.Bool("force-destructive-production-drop", false, "Override target safety checks for non-test target database")
-	
+
 	_ = cmd.Parse(os.Args[2:])
 
 	cfg := loadConfig(*configPath)
+	ctx := context.Background()
+
+	if *execute {
+		*dryRun = false
+	}
+
+	if !*dryRun {
+		if err := validateLocalExecutionGate(cfg.SourceDSN, cfg.TargetDSN, *localOnly); err != nil {
+			fmt.Printf("\n❌ LOCAL EXECUTION SAFETY ERROR: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	// Target Production Drop Protection Safety Gate
-	if !isTestDatabase(cfg.TargetDSN) && !cfg.AllowDestructiveProductionOperations && !*forceDrop {
+	if !*dryRun && !isTestDatabase(cfg.TargetDSN) && !cfg.AllowDestructiveProductionOperations && !*forceDrop {
 		fmt.Printf("\n❌ CRITICAL SAFETY ERROR: Destructive operations (DROP/TRUNCATE) are blocked on non-test target database: %s\n", maskDSN(cfg.TargetDSN))
 		fmt.Println("To migrate onto a production target, you must either:")
 		fmt.Println("  1. Pass the CLI override flag: --force-destructive-production-drop")
@@ -179,6 +198,20 @@ func runMigrate() {
 		os.Exit(1)
 	}
 
+	reportPrefix := "reports/qantaradb_dry_run_report"
+	if !*dryRun {
+		reportPrefix = "reports/qantaradb_local_migration_report"
+	}
+
+	if *dryRun {
+		if err := writeMigrationPreviewReports(reportPrefix, schema, plan, ddlRes, true, "dry_run_only"); err != nil {
+			fmt.Printf("Failed to write dry-run report: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Dry-run complete. Reports generated:\n- %s.json\n- %s.md\n", reportPrefix, reportPrefix)
+		return
+	}
+
 	loaderInstance, err := loader.NewLoader(cfg.SourceDSN, cfg.TargetDSN, cfg.Loader)
 	if err != nil {
 		fmt.Printf("Loader connection failed: %v\n", err)
@@ -187,8 +220,15 @@ func runMigrate() {
 	defer loaderInstance.Close()
 
 	// Apply Tables DDL
-	// (Execution logic connecting pgx pool and running ddlRes.TablesDDL)
 	fmt.Println("Applying schema structure & creating tables...")
+	for _, tableName := range plan.TableOrder {
+		if stmt := ddlRes.TablesDDL[tableName]; strings.TrimSpace(stmt) != "" {
+			if err := loaderInstance.ExecPostgres(ctx, stmt); err != nil {
+				fmt.Printf("Failed to apply table DDL for %s: %v\n", tableName, err)
+				os.Exit(1)
+			}
+		}
+	}
 
 	// Streaming copy
 	for _, tableName := range plan.TableOrder {
@@ -210,7 +250,7 @@ func runMigrate() {
 			cols = append(cols, col.SourceName)
 		}
 
-		err = loaderInstance.StreamTable(cmd.Context(), tableName, tPlan.PrimaryKeyColumn, cols)
+		err = loaderInstance.StreamTable(ctx, tableName, tPlan.PrimaryKeyColumn, cols)
 		if err != nil {
 			fmt.Printf("Error migrating %s: %v\n", tableName, err)
 			os.Exit(1)
@@ -219,19 +259,96 @@ func runMigrate() {
 
 	// Apply Indexes and FK constraints DDL
 	fmt.Println("Migration streaming complete! Applying indexes and foreign keys constraints...")
+	for _, tableName := range plan.TableOrder {
+		if stmt := ddlRes.IndexesDDL[tableName]; strings.TrimSpace(stmt) != "" {
+			if err := loaderInstance.ExecPostgres(ctx, stmt); err != nil {
+				fmt.Printf("Failed to apply indexes for %s: %v\n", tableName, err)
+				os.Exit(1)
+			}
+		}
+	}
+	for _, tableName := range plan.TableOrder {
+		if stmt := ddlRes.ForeignKeysDDL[tableName]; strings.TrimSpace(stmt) != "" {
+			if err := loaderInstance.ExecPostgres(ctx, stmt); err != nil {
+				fmt.Printf("Failed to apply foreign keys for %s: %v\n", tableName, err)
+				os.Exit(1)
+			}
+		}
+	}
+	if err := writeMigrationPreviewReports(reportPrefix, schema, plan, ddlRes, false, "executed_local_only"); err != nil {
+		fmt.Printf("Failed to write migration report: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Println("All sequences synchronized successfully.")
 }
 
 func runValidate() {
 	cmd := flag.NewFlagSet("validate", flag.ExitOnError)
 	configPath := cmd.String("config", "config.yaml", "Path to YAML configuration file")
-	out := cmd.String("out", "reports/validation.md", "Output markdown path for validation results")
-	
+	out := cmd.String("out", "reports/qantaradb_validation_report.md", "Output markdown path for validation results")
+	dryRun := cmd.Bool("dry-run", false, "Validate configuration and schema plan without connecting to target")
+
 	_ = cmd.Parse(os.Args[2:])
 
 	cfg := loadConfig(*configPath)
 	fmt.Println("Running validation audits on Source and Target databases...")
-	// Fetch actual tables validation and output report
+
+	schema, err := inspector.Inspect(cfg.SourceDSN)
+	if err != nil {
+		fmt.Printf("Validation source inspection failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	plan, err := planner.CreatePlan(schema, cfg.Mapper, cfg.Excludes)
+	if err != nil {
+		fmt.Printf("Validation planning failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *dryRun {
+		md := fmt.Sprintf("# QantaraDB Validation Dry Run\n\nstatus: dry_run\n\ntables_planned: %d\n\nsource: %s\n\ntarget: %s\n", len(plan.Tables), maskDSN(cfg.SourceDSN), maskDSN(cfg.TargetDSN))
+		if err := writeFile(*out, []byte(md)); err != nil {
+			fmt.Printf("Failed to write validation dry-run: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Validation dry-run exported to: %s\n", *out)
+		return
+	}
+
+	loaderInstance, err := loader.NewLoader(cfg.SourceDSN, cfg.TargetDSN, cfg.Loader)
+	if err != nil {
+		fmt.Printf("Validation connection failed: %v\n", err)
+		os.Exit(1)
+	}
+	defer loaderInstance.Close()
+
+	tables := make([]string, 0, len(plan.Tables))
+	pkMap := make(map[string]string)
+	for _, table := range plan.Tables {
+		tables = append(tables, table.TargetName)
+		if table.PrimaryKeyColumn != "" {
+			pkMap[table.TargetName] = table.PrimaryKeyColumn
+		}
+	}
+
+	validationReport, err := validator.Validate(loaderInstance.MySQLDB(), loaderInstance.PostgresPool(), tables, pkMap)
+	if err != nil {
+		fmt.Printf("Validation failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	jsonOut := strings.TrimSuffix(*out, filepath.Ext(*out)) + ".json"
+	jsonData, _ := json.MarshalIndent(validationReport, "", "  ")
+	if err := writeFile(jsonOut, jsonData); err != nil {
+		fmt.Printf("Failed to write validation JSON: %v\n", err)
+		os.Exit(1)
+	}
+
+	md := fmt.Sprintf("# QantaraDB Validation Report\n\nstatus: completed\n\ntotal_tables: %d\n\npassed_tables: %d\n\nforeign_keys_passed: %t\n", validationReport.TotalTables, validationReport.PassedTables, validationReport.FKIntegrityPassed)
+	if err := writeFile(*out, []byte(md)); err != nil {
+		fmt.Printf("Failed to write validation markdown: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("Validation markdown report exported to: %s\n", *out)
 }
 
@@ -247,7 +364,7 @@ func runReport() {
 
 	cfg := loadConfig(*configPath)
 	fmt.Println("Compiling all migration history and logs into visual report...")
-	
+
 	rep := &report.MigrationReport{
 		StartTime:         time.Now().Add(-5 * time.Minute),
 		EndTime:           time.Now(),
@@ -285,7 +402,7 @@ func runFoodTechPreflight() {
 	cmd := flag.NewFlagSet("foodtech-preflight", flag.ExitOnError)
 	mysqlDSN := cmd.String("mysql", "", "MySQL connection string (DSN)")
 	out := cmd.String("out", "reports/foodtech/postgres-readiness.md", "Output markdown path for preflight results")
-	
+
 	_ = cmd.Parse(os.Args[2:])
 
 	if *mysqlDSN == "" {
@@ -346,8 +463,20 @@ func loadConfig(path string) *ConfigFile {
 }
 
 func maskDSN(dsn string) string {
-	// Simple mask of password in DSN for security
-	return dsn // (Could write masking utility here)
+	if strings.Contains(dsn, "://") {
+		parsed, err := url.Parse(dsn)
+		if err == nil && parsed.User != nil {
+			username := parsed.User.Username()
+			parsed.User = url.UserPassword(username, "***")
+			return parsed.String()
+		}
+	}
+
+	if at := strings.Index(dsn, "@"); at > 0 {
+		return "***" + dsn[at:]
+	}
+
+	return dsn
 }
 
 func isTestDatabase(dsn string) bool {
@@ -362,13 +491,146 @@ func isTestDatabase(dsn string) bool {
 	return false
 }
 
+func validateLocalExecutionGate(sourceDSN, targetDSN string, localOnly bool) error {
+	if !localOnly {
+		return fmt.Errorf("--local-only is required for --execute")
+	}
+	if !isLocalDSN(sourceDSN) {
+		return fmt.Errorf("source DSN must point to localhost/127.0.0.1 for local execution: %s", maskDSN(sourceDSN))
+	}
+	if !isLocalDSN(targetDSN) {
+		return fmt.Errorf("target DSN must point to localhost/127.0.0.1 for local execution: %s", maskDSN(targetDSN))
+	}
+	targetDB := extractDatabaseName(targetDSN)
+	if !containsAny(strings.ToLower(targetDB), []string{"local", "test", "qantara"}) {
+		return fmt.Errorf("target database name must contain local, test, or qantara: %s", targetDB)
+	}
+	if strings.Contains(strings.ToLower(targetDB), "prod") && !containsAny(strings.ToLower(targetDB), []string{"qantara", "test", "local"}) {
+		return fmt.Errorf("target database name looks production-like: %s", targetDB)
+	}
+	return nil
+}
+
+func isLocalDSN(dsn string) bool {
+	host := extractHost(dsn)
+	return host == "" || host == "127.0.0.1" || host == "localhost" || host == "::1"
+}
+
+func extractHost(dsn string) string {
+	if strings.Contains(dsn, "://") {
+		parsed, err := url.Parse(dsn)
+		if err == nil {
+			return strings.ToLower(parsed.Hostname())
+		}
+	}
+
+	if start := strings.Index(dsn, "@tcp("); start >= 0 {
+		rest := dsn[start+5:]
+		if end := strings.Index(rest, ")"); end >= 0 {
+			hostPort := rest[:end]
+			host := hostPort
+			if colon := strings.LastIndex(hostPort, ":"); colon > 0 {
+				host = hostPort[:colon]
+			}
+			return strings.ToLower(strings.Trim(host, "[]"))
+		}
+	}
+
+	return ""
+}
+
+func extractDatabaseName(dsn string) string {
+	if strings.Contains(dsn, "://") {
+		parsed, err := url.Parse(dsn)
+		if err == nil {
+			return strings.TrimPrefix(parsed.Path, "/")
+		}
+	}
+
+	if slash := strings.LastIndex(dsn, ")/"); slash >= 0 {
+		db := dsn[slash+2:]
+		if q := strings.Index(db, "?"); q >= 0 {
+			db = db[:q]
+		}
+		return db
+	}
+
+	return dsn
+}
+
+func containsAny(value string, needles []string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func writeMigrationPreviewReports(prefix string, schema *inspector.SchemaInfo, plan *planner.MigrationPlan, ddlRes *ddl.DDLResult, dryRun bool, status string) error {
+	payload := map[string]interface{}{
+		"status":          status,
+		"dry_run":         dryRun,
+		"source_database": schema.DatabaseName,
+		"tables_detected": len(schema.Tables),
+		"tables_planned":  len(plan.Tables),
+		"table_order":     plan.TableOrder,
+		"tables_ddl":      len(ddlRes.TablesDDL),
+		"indexes_ddl":     len(ddlRes.IndexesDDL),
+		"foreign_keys":    len(ddlRes.ForeignKeysDDL),
+		"generated_at":    time.Now().UTC().Format(time.RFC3339),
+	}
+
+	jsonData, _ := json.MarshalIndent(payload, "", "  ")
+	if err := writeFile(prefix+".json", jsonData); err != nil {
+		return err
+	}
+
+	md := fmt.Sprintf(`# QantaraDB Migration Report
+
+status:
+%s
+
+dry_run:
+%t
+
+source_database:
+%s
+
+tables_detected:
+%d
+
+tables_planned:
+%d
+
+tables_ddl:
+%d
+
+indexes_ddl:
+%d
+
+foreign_keys:
+%d
+`, status, dryRun, schema.DatabaseName, len(schema.Tables), len(plan.Tables), len(ddlRes.TablesDDL), len(ddlRes.IndexesDDL), len(ddlRes.ForeignKeysDDL))
+
+	return writeFile(prefix+".md", []byte(md))
+}
+
+func writeFile(path string, data []byte) error {
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
 func getMockFoodTechSchema() *inspector.SchemaInfo {
-	colName := "order_status"
 	colType := "enum('pending','preparing','delivered','canceled')"
 	charset := "utf8mb4_unicode_ci"
-	
+
 	return &inspector.SchemaInfo{
-		DatabaseName: "foodtech_production",
+		DatabaseName:  "foodtech_production",
 		ServerVersion: "8.0.32",
 		Tables: []inspector.Table{
 			{

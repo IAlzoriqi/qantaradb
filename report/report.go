@@ -10,22 +10,22 @@ import (
 )
 
 type MigrationReport struct {
-	StartTime          time.Time                   `json:"start_time"`
-	EndTime            time.Time                   `json:"end_time"`
-	DurationSeconds    float64                     `json:"duration_seconds"`
-	SourceDatabase     string                      `json:"source_database"`
-	TargetDatabase     string                      `json:"target_database"`
-	TotalRowsMigrated  int64                       `json:"total_rows_migrated"`
-	AvgRowsPerSecond   float64                     `json:"avg_rows_per_second"`
-	TablesCount        int                         `json:"tables_count"`
-	TablesPassed       int                         `json:"tables_passed"`
-	Validation         *validator.ValidationReport `json:"validation"`
-	Warnings           []string                    `json:"warnings"`
+	StartTime         time.Time                   `json:"start_time"`
+	EndTime           time.Time                   `json:"end_time"`
+	DurationSeconds   float64                     `json:"duration_seconds"`
+	SourceDatabase    string                      `json:"source_database"`
+	TargetDatabase    string                      `json:"target_database"`
+	TotalRowsMigrated int64                       `json:"total_rows_migrated"`
+	AvgRowsPerSecond  float64                     `json:"avg_rows_per_second"`
+	TablesCount       int                         `json:"tables_count"`
+	TablesPassed      int                         `json:"tables_passed"`
+	Validation        *validator.ValidationReport `json:"validation"`
+	Warnings          []string                    `json:"warnings"`
 }
 
 func GenerateReport(rep *MigrationReport, jsonPath, mdPath string) error {
 	rep.DurationSeconds = rep.EndTime.Sub(rep.StartTime).Seconds()
-	
+
 	// Write JSON
 	jsonData, err := json.MarshalIndent(rep, "", "  ")
 	if err != nil {

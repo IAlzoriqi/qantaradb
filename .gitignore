@@ -23,3 +23,8 @@ go.work.sum
 
 # env file
 .env
+
+# Local generated artifacts and reports
+build/
+reports/
+storage/reports/
