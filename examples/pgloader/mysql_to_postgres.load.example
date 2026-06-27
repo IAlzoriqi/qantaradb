@@ -1,0 +1,33 @@
+LOAD DATABASE
+     FROM mysql://MYSQL_USER:MYSQL_PASSWORD@127.0.0.1:3306/foodtech_test
+     INTO postgresql://POSTGRES_USER:POSTGRES_PASSWORD@127.0.0.1:55432/foodtech_qantara_console_test
+
+WITH include drop,
+     create tables,
+     create indexes,
+     reset sequences,
+     foreign keys,
+     workers = 4,
+     concurrency = 2,
+     batch rows = 1000,
+     prefetch rows = 1000
+
+EXCLUDING TABLE NAMES MATCHING
+     ~/^sessions$/,
+     ~/^failed_jobs$/,
+     ~/^temp_debug_log$/
+
+ALTER SCHEMA 'foodtech_test' RENAME TO 'public'
+
+CAST
+     type datetime to timestamptz drop default drop not null using zero-dates-to-null,
+     type date drop default drop not null using zero-dates-to-null,
+     type bigint when unsigned to bigint drop typemod,
+     type bigint to bigint drop typemod,
+     type int when unsigned to bigint drop typemod,
+     type int to integer drop typemod,
+     type tinyint when (= precision 1) to smallint drop typemod
+
+SET PostgreSQL PARAMETERS
+     maintenance_work_mem to '512MB',
+     work_mem to '64MB';
