@@ -4,7 +4,7 @@ status:
 active
 
 latest_local_validation:
-VALIDATION_FAILED
+VALIDATION_PARTIAL
 
 latest_local_validation_summary:
 - local-only validation ran against MySQL `foodtech_test` and temporary PostgreSQL `foodtech_qantara_validation_test`.
@@ -12,7 +12,10 @@ latest_local_validation_summary:
 - FK validation passed.
 - sequence reset passed.
 - sanitized rows report was clean.
-- staging readiness remains blocked by real checksum mismatches in 10 tables.
+- checksum drilldown was clean.
+- no real checksum mismatches remain.
+- 10 tables are classified as normalized-equivalent after fixing `pgtype.Numeric` and decimal normalization.
+- staging readiness is ready for owner-approved staging dry-run planning.
 
 purpose:
 Block unsafe staging upload or staging database migration until local validation proves that the MySQL to PostgreSQL migration is structurally safe.

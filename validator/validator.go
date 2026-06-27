@@ -22,6 +22,7 @@ type ValidationReport struct {
 	TypeMappings       []TypeMapItem        `json:"type_mappings"`
 	ArabicEmojiAudit   ArabicEmojiReport    `json:"arabic_emoji_audit"`
 	SequenceValidation SequenceResetReport  `json:"sequence_validation"`
+	ChecksumDrilldown  ChecksumDrilldown    `json:"checksum_mismatch_drilldown"`
 }
 
 type TableValidation struct {
@@ -100,6 +101,10 @@ func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map
 		FKIntegrityPassed: true,
 		FKViolations:      []FKViolation{},
 		TypeMappings:      []TypeMapItem{},
+		ChecksumDrilldown: ChecksumDrilldown{
+			Status: "clean",
+			Items:  []ChecksumMismatchItem{},
+		},
 		SequenceValidation: SequenceResetReport{
 			Status: "not_run",
 			Items:  []SequenceResetResult{},
@@ -185,13 +190,14 @@ func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map
 
 			// Chunk / Sample Checksum Validation (SHA-256 over first 100 rows)
 			if val.SourceCount > 0 {
-				srcChecksum, tgtChecksum, checksumStatus, checksumDetails, csErr := calculateSampleChecksum(ctx, mysqlDB, pgxPool, t, pkCol)
+				srcChecksum, tgtChecksum, checksumStatus, checksumDetails, drilldown, csErr := calculateSampleChecksum(ctx, mysqlDB, pgxPool, t, pkCol)
 				if csErr == nil {
 					val.SourceChecksum = srcChecksum
 					val.TargetChecksum = tgtChecksum
 					val.ChecksumStatus = checksumStatus
 					val.ChecksumDetails = checksumDetails
 					val.ChecksumMatch = checksumStatus == "passed" || checksumStatus == "normalized_equivalent" || checksumStatus == "sanitized_equivalent"
+					report.ChecksumDrilldown.Items = append(report.ChecksumDrilldown.Items, drilldown.Items...)
 				} else {
 					val.ChecksumMatch = false
 					val.ChecksumStatus = "unsupported_comparison"
@@ -260,6 +266,9 @@ func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map
 	}
 
 	report.SequenceValidation = ResetAndValidateSequences(ctx, pgxPool, tables, pkMap)
+	if len(report.ChecksumDrilldown.Items) > 0 {
+		report.ChecksumDrilldown.Status = "mismatches_detected"
+	}
 
 	// 5. Audit for Arabic & Emoji Transcoding Losses (Check if any  symbols were loaded into Target)
 	for _, t := range tables {
@@ -298,12 +307,13 @@ func Validate(mysqlDB *sql.DB, pgxPool *pgxpool.Pool, tables []string, pkMap map
 	return report, nil
 }
 
-func calculateSampleChecksum(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxpool.Pool, table, pkCol string) (string, string, string, string, error) {
+func calculateSampleChecksum(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxpool.Pool, table, pkCol string) (string, string, string, string, ChecksumDrilldown, error) {
+	drilldown := ChecksumDrilldown{Status: "clean", Items: []ChecksumMismatchItem{}}
 	// 1. Fetch first 100 rows from MySQL
 	srcQuery := fmt.Sprintf("SELECT * FROM `%s` ORDER BY `%s` ASC LIMIT 100", table, pkCol)
 	srcRows, err := mysqlDB.Query(srcQuery)
 	if err != nil {
-		return "", "", "unsupported_comparison", "", err
+		return "", "", "unsupported_comparison", "", drilldown, err
 	}
 	defer srcRows.Close()
 
@@ -316,53 +326,79 @@ func calculateSampleChecksum(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxp
 
 	var srcRawConcat []string
 	var srcNormalizedConcat []string
+	var srcNormalizedRows [][]string
+	var srcRawRows [][]string
+	var srcFlagRows [][]checksumFlags
+	var primaryKeys []string
 	srcSanitized := false
 	srcUnsupported := false
 	for srcRows.Next() {
 		_ = srcRows.Scan(srcScanArgs...)
 		rawRowStr := ""
 		normalizedRowStr := ""
-		for _, val := range srcValues {
+		rowNormalized := make([]string, len(srcValues))
+		rowRaw := make([]string, len(srcValues))
+		rowFlags := make([]checksumFlags, len(srcValues))
+		for i, val := range srcValues {
 			rawValue := rawChecksumValue(val)
 			normalizedValue, flags := normalizeChecksumValue(val)
 			rawRowStr += rawValue + "|"
 			normalizedRowStr += normalizedValue + "|"
+			rowRaw[i] = rawValue
+			rowNormalized[i] = normalizedValue
+			rowFlags[i] = flags
 			srcSanitized = srcSanitized || flags.Sanitized
 			srcUnsupported = srcUnsupported || flags.Unsupported
 		}
+		primaryKeys = append(primaryKeys, valueAtColumn(srcCols, srcValues, pkCol))
 		srcRawConcat = append(srcRawConcat, rawRowStr)
 		srcNormalizedConcat = append(srcNormalizedConcat, normalizedRowStr)
+		srcRawRows = append(srcRawRows, rowRaw)
+		srcNormalizedRows = append(srcNormalizedRows, rowNormalized)
+		srcFlagRows = append(srcFlagRows, rowFlags)
 	}
 
 	// 2. Fetch first 100 rows from PostgreSQL
-	tgtQuery := fmt.Sprintf("SELECT * FROM \"%s\" ORDER BY \"%s\" ASC LIMIT 100", table, pkCol)
+	tgtQuery := fmt.Sprintf("SELECT %s FROM %s ORDER BY %s ASC LIMIT 100", quoteColumnList(srcCols), quoteIdentifier(table), quoteIdentifier(pkCol))
 	tgtRows, err := pgxPool.Query(ctx, tgtQuery)
 	if err != nil {
-		return "", "", "unsupported_comparison", "", err
+		return "", "", "unsupported_comparison", "", drilldown, err
 	}
 	defer tgtRows.Close()
 
 	var tgtRawConcat []string
 	var tgtNormalizedConcat []string
+	var tgtNormalizedRows [][]string
+	var tgtRawRows [][]string
+	var tgtFlagRows [][]checksumFlags
 	tgtSanitized := false
 	tgtUnsupported := false
 	for tgtRows.Next() {
 		tgtValues, err := tgtRows.Values()
 		if err != nil {
-			return "", "", "unsupported_comparison", "", err
+			return "", "", "unsupported_comparison", "", drilldown, err
 		}
 		rawRowStr := ""
 		normalizedRowStr := ""
-		for _, val := range tgtValues {
+		rowNormalized := make([]string, len(tgtValues))
+		rowRaw := make([]string, len(tgtValues))
+		rowFlags := make([]checksumFlags, len(tgtValues))
+		for i, val := range tgtValues {
 			rawValue := rawChecksumValue(val)
 			normalizedValue, flags := normalizeChecksumValue(val)
 			rawRowStr += rawValue + "|"
 			normalizedRowStr += normalizedValue + "|"
+			rowRaw[i] = rawValue
+			rowNormalized[i] = normalizedValue
+			rowFlags[i] = flags
 			tgtSanitized = tgtSanitized || flags.Sanitized
 			tgtUnsupported = tgtUnsupported || flags.Unsupported
 		}
 		tgtRawConcat = append(tgtRawConcat, rawRowStr)
 		tgtNormalizedConcat = append(tgtNormalizedConcat, normalizedRowStr)
+		tgtRawRows = append(tgtRawRows, rowRaw)
+		tgtNormalizedRows = append(tgtNormalizedRows, rowNormalized)
+		tgtFlagRows = append(tgtFlagRows, rowFlags)
 	}
 
 	// Compare lengths and generate sha256 checksum strings
@@ -380,16 +416,35 @@ func calculateSampleChecksum(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxp
 	targetHash := hex.EncodeToString(tgtHash[:])
 	switch {
 	case sourceHash == targetHash:
-		return sourceHash, targetHash, "passed", "raw checksums match", nil
+		return sourceHash, targetHash, "passed", "raw checksums match", drilldown, nil
 	case srcUnsupported || tgtUnsupported:
-		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "unsupported_comparison", "binary/blob or unsupported value prevented safe checksum comparison", nil
+		drilldown = buildChecksumDrilldown(table, srcCols, primaryKeys, srcRawRows, tgtRawRows, srcNormalizedRows, tgtNormalizedRows, srcFlagRows, tgtFlagRows)
+		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "unsupported_comparison", "binary/blob or unsupported value prevented safe checksum comparison", drilldown, nil
 	case hex.EncodeToString(srcNormalizedHash[:]) == hex.EncodeToString(tgtNormalizedHash[:]) && (srcSanitized || tgtSanitized):
-		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "sanitized_equivalent", "normalized checksums match after UTF-8/NUL sanitization", nil
+		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "sanitized_equivalent", "normalized checksums match after UTF-8/NUL sanitization", drilldown, nil
 	case hex.EncodeToString(srcNormalizedHash[:]) == hex.EncodeToString(tgtNormalizedHash[:]):
-		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "normalized_equivalent", "normalized checksums match across driver rendering differences", nil
+		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "normalized_equivalent", "normalized checksums match across driver rendering differences", drilldown, nil
 	default:
-		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "real_mismatch", "normalized checksums still differ", nil
+		drilldown = buildChecksumDrilldown(table, srcCols, primaryKeys, srcRawRows, tgtRawRows, srcNormalizedRows, tgtNormalizedRows, srcFlagRows, tgtFlagRows)
+		return hex.EncodeToString(srcNormalizedHash[:]), hex.EncodeToString(tgtNormalizedHash[:]), "real_mismatch", "normalized checksums still differ", drilldown, nil
 	}
+}
+
+func valueAtColumn(columns []string, values []interface{}, column string) string {
+	for i, name := range columns {
+		if name == column && i < len(values) {
+			return rawChecksumValue(values[i])
+		}
+	}
+	return "unknown"
+}
+
+func quoteColumnList(columns []string) string {
+	quoted := make([]string, 0, len(columns))
+	for _, column := range columns {
+		quoted = append(quoted, quoteIdentifier(column))
+	}
+	return strings.Join(quoted, ", ")
 }
 
 func auditTypeMappings(ctx context.Context, mysqlDB *sql.DB, pgxPool *pgxpool.Pool, table string) ([]TypeMapItem, error) {

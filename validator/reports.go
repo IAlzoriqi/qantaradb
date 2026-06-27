@@ -26,6 +26,34 @@ func WriteSequenceResetReports(report SequenceResetReport, jsonPath, mdPath stri
 	return writeText(mdPath, md)
 }
 
+func WriteChecksumDrilldownReports(report ChecksumDrilldown, jsonPath, mdPath string) error {
+	if err := writeJSON(jsonPath, report); err != nil {
+		return err
+	}
+	md := "# QantaraDB Checksum Mismatch Drilldown\n\n"
+	md += fmt.Sprintf("status: %s\n\n", report.Status)
+	md += "| table | primary_key | column | reason | suggested_classification | source_hash | target_hash | source_sample | target_sample |\n"
+	md += "| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+	if len(report.Items) == 0 {
+		md += "| none | none | none | none | none | none | none | none | none |\n"
+	} else {
+		for _, item := range report.Items {
+			md += fmt.Sprintf("| `%s` | `%s` | `%s` | %s | `%s` | `%s` | `%s` | `%s` | `%s` |\n",
+				item.Table,
+				item.PrimaryKey,
+				item.Column,
+				item.MismatchReason,
+				item.SuggestedClassification,
+				item.SourceNormalizedHash,
+				item.TargetNormalizedHash,
+				item.SourceSampleLimited,
+				item.TargetSampleLimited,
+			)
+		}
+	}
+	return writeText(mdPath, md)
+}
+
 func writeJSON(path string, payload interface{}) error {
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

@@ -365,6 +365,14 @@ func runValidate() {
 		fmt.Printf("Failed to write sequence reset report: %v\n", err)
 		os.Exit(1)
 	}
+	if err := validator.WriteChecksumDrilldownReports(
+		validationReport.ChecksumDrilldown,
+		"storage/reports/qantaradb_checksum_mismatch_drilldown.json",
+		"storage/reports/qantaradb_checksum_mismatch_drilldown.md",
+	); err != nil {
+		fmt.Printf("Failed to write checksum mismatch drilldown report: %v\n", err)
+		os.Exit(1)
+	}
 	if err := loader.WriteSanitizedRowsReports(
 		loaderInstance.SanitizedRowsReport(),
 		"storage/reports/qantaradb_sanitized_rows_report.json",
