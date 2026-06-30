@@ -38,6 +38,14 @@ type JobState struct {
 	Progresses     map[string]*TableProgress `json:"progress_map"`
 }
 
+type completedStateAction string
+
+const (
+	completedStateSkip        completedStateAction = "skip"
+	completedStateRecopyClean completedStateAction = "recopy_clean_target"
+	completedStateFail        completedStateAction = "fail"
+)
+
 type ColumnPlan struct {
 	SourceName string
 	TargetName string
@@ -162,14 +170,6 @@ func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, colum
 	}
 	l.stateMux.Unlock()
 
-	if prog.Status == "completed" {
-		fmt.Printf("Table %s already fully migrated. Skipping.\n", tableName)
-		return nil
-	}
-
-	prog.Status = "running"
-	_ = l.saveState()
-
 	// Get total rows count
 	var totalRows int64
 	err := l.mysqlDB.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM `%s`", tableName)).Scan(&totalRows)
@@ -179,6 +179,36 @@ func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, colum
 		return fmt.Errorf("failed to count rows: %w", err)
 	}
 	prog.TotalRows = totalRows
+
+	targetRows, err := l.targetRowCount(ctx, tableName)
+	if err != nil {
+		prog.Status = "failed"
+		_ = l.saveState()
+		return fmt.Errorf("failed to count target rows: %w", err)
+	}
+
+	if prog.Status == "completed" {
+		switch action := completedStateResumeAction(totalRows, targetRows); action {
+		case completedStateSkip:
+			fmt.Printf("Table %s already fully migrated and row-count verified. Skipping.\n", tableName)
+			prog.CompletedRows = totalRows
+			_ = l.saveState()
+			return nil
+		case completedStateRecopyClean:
+			fmt.Printf("Table %s had completed state but clean target has 0/%d rows. Re-copying instead of unsafe skip.\n", tableName, totalRows)
+			prog.Status = "pending"
+			prog.CompletedRows = 0
+			prog.LastPKValue = nil
+			_ = l.saveState()
+		case completedStateFail:
+			prog.Status = "failed"
+			_ = l.saveState()
+			return fmt.Errorf("unsafe resume state for %s: state says completed but source rows=%d target rows=%d; use a clean target/state reset before rerun", tableName, totalRows, targetRows)
+		}
+	}
+
+	prog.Status = "running"
+	_ = l.saveState()
 
 	start := time.Now()
 
@@ -197,6 +227,18 @@ func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, colum
 		return err
 	}
 
+	targetRows, err = l.targetRowCount(ctx, tableName)
+	if err != nil {
+		prog.Status = "failed"
+		_ = l.saveState()
+		return fmt.Errorf("failed to verify target row count after copy: %w", err)
+	}
+	if targetRows != totalRows {
+		prog.Status = "failed"
+		_ = l.saveState()
+		return fmt.Errorf("row-count verification failed after copy for %s: source rows=%d target rows=%d; table is not marked migrated", tableName, totalRows, targetRows)
+	}
+
 	prog.Status = "completed"
 	prog.CompletedRows = totalRows
 	prog.RowsPerSec = float64(totalRows) / time.Since(start).Seconds()
@@ -204,6 +246,25 @@ func (l *Loader) StreamTable(ctx context.Context, tableName, pkCol string, colum
 	_ = l.saveState()
 
 	return nil
+}
+
+func completedStateResumeAction(sourceRows, targetRows int64) completedStateAction {
+	if sourceRows == targetRows {
+		return completedStateSkip
+	}
+	if sourceRows > 0 && targetRows == 0 {
+		return completedStateRecopyClean
+	}
+	return completedStateFail
+}
+
+func (l *Loader) targetRowCount(ctx context.Context, tableName string) (int64, error) {
+	var count int64
+	query := fmt.Sprintf("SELECT COUNT(*) FROM %s", pgx.Identifier{tableName}.Sanitize())
+	if err := l.pgxPool.QueryRow(ctx, query).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (l *Loader) streamWithPKChunking(ctx context.Context, tableName, pkCol string, columns []ColumnPlan, prog *TableProgress, start time.Time) error {
