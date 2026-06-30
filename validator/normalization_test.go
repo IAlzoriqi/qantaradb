@@ -56,6 +56,29 @@ func TestNormalizeChecksumValueHandlesPGNumericRendering(t *testing.T) {
 	}
 }
 
+func TestNormalizeChecksumValueHandlesPGTimeRendering(t *testing.T) {
+	source, sourceFlags := normalizeChecksumValue("09:30:00")
+	target, targetFlags := normalizeChecksumValue(pgtype.Time{
+		Microseconds: (9*60*60 + 30*60) * 1_000_000,
+		Valid:        true,
+	})
+	if sourceFlags.Unsupported || targetFlags.Unsupported {
+		t.Fatal("expected clock time values to be supported")
+	}
+	if source != target {
+		t.Fatalf("expected clock values to match, got %q != %q", source, target)
+	}
+
+	source, _ = normalizeChecksumValue("00:01:00")
+	target, _ = normalizeChecksumValue(pgtype.Time{
+		Microseconds: 60 * 1_000_000,
+		Valid:        true,
+	})
+	if source != target {
+		t.Fatalf("expected minute clock values to match, got %q != %q", source, target)
+	}
+}
+
 func TestNormalizeChecksumValueMarksSanitizedText(t *testing.T) {
 	normalized, flags := normalizeChecksumValue("abc\x00def")
 	if normalized != "string:abcdef" {

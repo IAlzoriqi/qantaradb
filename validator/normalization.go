@@ -49,6 +49,12 @@ func normalizeChecksumValue(value interface{}) (string, checksumFlags) {
 			return "UNSUPPORTED_NUMERIC", checksumFlags{Unsupported: true}
 		}
 		return "scalar:" + normalized, checksumFlags{}
+	case pgtype.Time:
+		normalized, ok := normalizePGTime(v)
+		if !ok {
+			return "NULL", checksumFlags{}
+		}
+		return "clock:" + normalized, checksumFlags{}
 	case []byte:
 		if !utf8.Valid(v) {
 			return "UNSUPPORTED_BINARY", checksumFlags{Unsupported: true}
@@ -134,6 +140,9 @@ func normalizeStringForChecksum(value string) (string, checksumFlags) {
 	if normalizedJSON, ok := normalizeJSON(trimmed); ok {
 		return "json:" + normalizedJSON, flags
 	}
+	if normalizedClock, ok := normalizeClockTime(trimmed); ok {
+		return "clock:" + normalizedClock, flags
+	}
 	if normalizedTime, ok := normalizeTime(trimmed); ok {
 		return "time:" + normalizedTime, flags
 	}
@@ -148,6 +157,47 @@ func normalizeStringForChecksum(value string) (string, checksumFlags) {
 	}
 
 	return "string:" + trimmed, flags
+}
+
+func normalizePGTime(value pgtype.Time) (string, bool) {
+	if !value.Valid {
+		return "", false
+	}
+	if value.Microseconds < 0 {
+		return "", false
+	}
+	return formatClockMicroseconds(value.Microseconds), true
+}
+
+func normalizeClockTime(value string) (string, bool) {
+	layouts := []string{
+		"15:04:05.999999",
+		"15:04:05",
+	}
+	for _, layout := range layouts {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			microseconds := int64(parsed.Hour())*int64(time.Hour/time.Microsecond) +
+				int64(parsed.Minute())*int64(time.Minute/time.Microsecond) +
+				int64(parsed.Second())*int64(time.Second/time.Microsecond) +
+				int64(parsed.Nanosecond()/int(time.Microsecond))
+			return formatClockMicroseconds(microseconds), true
+		}
+	}
+	return "", false
+}
+
+func formatClockMicroseconds(microseconds int64) string {
+	hour := microseconds / int64(time.Hour/time.Microsecond)
+	microseconds %= int64(time.Hour / time.Microsecond)
+	minute := microseconds / int64(time.Minute/time.Microsecond)
+	microseconds %= int64(time.Minute / time.Microsecond)
+	second := microseconds / int64(time.Second/time.Microsecond)
+	microseconds %= int64(time.Second / time.Microsecond)
+
+	if microseconds == 0 {
+		return fmt.Sprintf("%02d:%02d:%02d", hour, minute, second)
+	}
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%02d:%02d:%02d.%06d", hour, minute, second, microseconds), "0"), ".")
 }
 
 func normalizeJSON(value string) (string, bool) {
